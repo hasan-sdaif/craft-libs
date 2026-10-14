@@ -12,6 +12,7 @@ repository = "https://github.com/storytold/craft-libs"
 [workspace.dependencies]
 # internal: add each crate here as `craft-<name> = { path = "crates/<name>" }`
 craft-atomic = { path = "crates/atomic" }
+craft-collab = { path = "crates/collab" }
 craft-cms = { path = "crates/cms" }
 craft-print = { path = "crates/print" }
 craft-quit = { path = "crates/quit" }
@@ -19,6 +20,11 @@ craft-settings = { path = "crates/settings" }
 craft-ui = { path = "crates/ui" }
 egui = { version = "0.36", default-features = false }
 rayon = "1"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+thiserror = "2"
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+proptest = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
