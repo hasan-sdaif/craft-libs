@@ -80,34 +80,67 @@ impl TextDoc {
 
     /// The elements in the RGA total order (spec §6.6 `total_order`).
     ///
-    /// Walk from the head; among the elements anchored after the current one, the **smallest**
-    /// id renders first — a deterministic order every replica agrees on without coordination
-    /// (any fixed tie-break converges; this one keeps earlier client spaces reading first).
+    /// Walk from the head; among the elements anchored after the current one, the **largest**
+    /// id renders first — the classic RGA rule, and the one that keeps
+    /// [`local_insert`](Self::local_insert)'s position honest: a fresh insert (a later, larger
+    /// id) anchored after `P` renders before `P`'s older successors, exactly where the caller
+    /// placed it. Concurrent inserts at one anchor stay deterministic everywhere (any fixed
+    /// tie-break converges; this one reads the later client's insert first).
     fn ordered(&self) -> Vec<Elem> {
         // Build the children-by-anchor index.
         let mut after_head: Vec<usize> = Vec::new();
         let mut by_anchor: std::collections::HashMap<Option<NodeId>, Vec<usize>> = std::collections::HashMap::new();
+        let known: std::collections::HashSet<NodeId> = self.elems.iter().map(|e| e.id).collect();
         for (i, e) in self.elems.iter().enumerate() {
             match e.after {
-                None => after_head.push(i),
-                Some(_) => by_anchor.entry(e.after).or_default().push(i),
+                Some(a) if known.contains(&a) => by_anchor.entry(e.after).or_default().push(i),
+                // `None`, or a dangling anchor (its element was compacted away on this
+                // replica): the head level — the character still renders, never vanishes.
+                _ => after_head.push(i),
             }
         }
         let mut out = Vec::with_capacity(self.elems.len());
         let mut stack: Vec<usize> = after_head;
-        // Sort each level by id descending (RGA-split order).
-        stack.sort_by_key(|i| std::cmp::Reverse(self.elems[*i].id));
+        // Sort each level by id ascending, so the stack pops the largest first: siblings
+        // render in descending id order (the classic RGA rule — see the method doc).
+        stack.sort_by_key(|i| self.elems[*i].id);
         while let Some(i) = stack.pop() {
             out.push(self.elems[i].clone());
             if let Some(kids) = by_anchor.get(&Some(self.elems[i].id)) {
                 let mut kids = kids.clone();
-                kids.sort_by_key(|k| std::cmp::Reverse(self.elems[*k].id));
+                kids.sort_by_key(|k| self.elems[*k].id);
                 for k in kids {
                     stack.push(k);
                 }
             }
         }
         out
+    }
+
+    /// Build the wire delta for `ops` against the state they were applied to: exactly the
+    /// inserted elements and the tombstoned ones, each carrying its full anchor (spec §6.6
+    /// rule 2 — the delta is edit-sized and rides the ordinary batch).
+    ///
+    /// The deleted elements are looked up in `self` (where `local_delete` has already
+    /// tombstoned them), so the delta carries their anchor and character too — a bare
+    /// `Del` op against an empty doc would be a silent no-op, and the receiving replica
+    /// would never learn about the deletion.
+    #[must_use]
+    pub fn delta(&self, ops: &[TextOp]) -> TextDoc {
+        let mut d = TextDoc::new();
+        for op in ops {
+            match op {
+                TextOp::Ins { after, id, ch } => {
+                    d.elems.push(Elem { id: *id, after: *after, ch: *ch, tombstone: false });
+                }
+                TextOp::Del { id } => {
+                    if let Some(e) = self.elems.iter().find(|e| e.id == *id) {
+                        d.elems.push(e.clone());
+                    }
+                }
+            }
+        }
+        d
     }
 
     /// Apply one remote operation (idempotent: a seen insert is a no-op, spec §6.6).
@@ -164,13 +197,18 @@ impl TextDoc {
     /// fall to zero when everything is rebuilt).
     pub fn compact(&mut self) {
         let live = self.ordered();
+        // Re-chain the survivors: each anchors after its live predecessor, preserving the
+        // total order exactly. (Resetting a dead anchor to the head instead would pit the
+        // survivor against the head's own siblings under the id tie-break and reorder the
+        // text.) A delta that later arrives anchored inside the compacted-away run renders
+        // at the head level on this replica — the character is never lost; run-tombstones
+        // that keep every dead id resolvable are the spec's complete answer and stay the
+        // documented follow-up.
         self.elems = live.into_iter().filter(|e| !e.tombstone).collect();
-        // Reset anchors that point at compacted (removed) elements to the head.
-        let live_ids: std::collections::HashSet<NodeId> = self.elems.iter().map(|e| e.id).collect();
+        let mut prev: Option<NodeId> = None;
         for e in &mut self.elems {
-            if e.after.is_some_and(|a| !live_ids.contains(&a)) {
-                e.after = None;
-            }
+            e.after = prev;
+            prev = Some(e.id);
         }
     }
 }
@@ -229,11 +267,79 @@ mod tests {
             b.apply(op);
         }
         // Both keep everything, in the same order — no character is lost. Concurrent
-        // inserts at one anchor render in ascending id order (the smaller client space
-        // first), so the merged text reads "hello world there" on both replicas —
-        // deterministic everywhere, with zero coordination.
+        // inserts at one anchor render in descending id order (the classic RGA rule), so
+        // the merged text reads "hello there world" on both replicas — deterministic
+        // everywhere, with zero coordination.
         assert_eq!(a.render(), b.render());
-        assert_eq!(a.render(), "hello world there");
+        assert_eq!(a.render(), "hello there world");
+    }
+
+    /// A mid-string insert lands at its position: a fresh insert anchored after `P` renders
+    /// before `P`'s older successors. Found by the `WordCraft` adapter's integration suite —
+    /// the original ascending tie-break put the insert *after* the old successor, so an
+    /// inserted comma rendered after the period that followed it.
+    #[test]
+    fn mid_string_insert_lands_at_its_position() {
+        let mut t = TextDoc::new();
+        let mut alloc = crate::ids::Allocator::new();
+        let _ = t.local_insert(0, "claim.", &mut alloc, 0);
+        // Insert ", stated plainly" between 'm' and '.'.
+        let ops = t.local_insert(5, ", stated plainly", &mut alloc, 1);
+        assert_eq!(t.render(), "claim, stated plainly.");
+        // The same edit, delivered as a delta to a replica of the base, lands identically.
+        let mut r = TextDoc::new();
+        let mut ralloc = crate::ids::Allocator::new();
+        let base_ops = r.local_insert(0, "claim.", &mut ralloc, 0);
+        let _ = base_ops;
+        let wire = t.delta(&ops);
+        let Ok(json) = serde_json::to_value(&wire) else { panic!("serialize") };
+        let elems = json["elems"].as_array().cloned().unwrap_or_default();
+        for elem in &elems {
+            let id = elem["id"].as_u64().map(NodeId);
+            let Some(id) = id else { continue };
+            if elem["tombstone"].as_bool().unwrap_or(false) {
+                r.apply(&TextOp::Del { id });
+                continue;
+            }
+            let after = elem["after"].as_u64().map(NodeId);
+            if let Some(ch) = elem["ch"].as_str().and_then(|s| s.chars().next()) {
+                r.apply(&TextOp::Ins { after, id, ch });
+            }
+        }
+        assert_eq!(r.render(), "claim, stated plainly.");
+    }
+
+    /// The wire delta carries deletions: a replace-with-no-common-suffix edit tombstones the
+    /// old characters on the receiving replica (a delta that dropped its `Del` ops would
+    /// leave the old text alive there — divergence).
+    #[test]
+    fn delta_carries_tombstones() {
+        let mut t = TextDoc::new();
+        let mut alloc = crate::ids::Allocator::new();
+        let _ = t.local_insert(0, "old text", &mut alloc, 0);
+        // Replace the whole tail (no common suffix): delete 8, insert "new text".
+        let mut ops = t.local_delete(0, 8);
+        ops.extend(t.local_insert(0, "new text", &mut alloc, 1));
+        assert_eq!(t.render(), "new text");
+        let wire = t.delta(&ops);
+        assert!(wire.elems.iter().any(|e| e.tombstone), "the delta carries the tombstones");
+        // Deliver to a replica of the base.
+        let mut r = TextDoc::new();
+        let mut ralloc = crate::ids::Allocator::new();
+        let _ = r.local_insert(0, "old text", &mut ralloc, 0);
+        let Ok(json) = serde_json::to_value(&wire) else { panic!("serialize") };
+        for elem in json["elems"].as_array().cloned().unwrap_or_default() {
+            let Some(id) = elem["id"].as_u64().map(NodeId) else { continue };
+            if elem["tombstone"].as_bool().unwrap_or(false) {
+                r.apply(&TextOp::Del { id });
+                continue;
+            }
+            let after = elem["after"].as_u64().map(NodeId);
+            if let Some(ch) = elem["ch"].as_str().and_then(|s| s.chars().next()) {
+                r.apply(&TextOp::Ins { after, id, ch });
+            }
+        }
+        assert_eq!(r.render(), "new text");
     }
 
     /// Deletes are tombstones: applying twice changes nothing, and compaction keeps the live.
