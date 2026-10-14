@@ -55,30 +55,34 @@ pub enum TextOp {
 
 impl TextDoc {
     /// An empty text.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// The number of live characters.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.elems.iter().filter(|e| !e.tombstone).count()
     }
 
     /// Whether the text has no live characters.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// The rendered string (tombstones skipped), in total order.
+    #[must_use]
     pub fn render(&self) -> String {
         self.ordered().iter().filter(|e| !e.tombstone).map(|e| e.ch).collect()
     }
 
     /// The elements in the RGA total order (spec §6.6 `total_order`).
     ///
-    /// The standard RGA order: walk from the head, choosing among the elements anchored after
-    /// the current one the one with the **greatest** id first (the newer insert sits before its
-    /// older sibling) — a deterministic order every replica agrees on without coordination.
+    /// Walk from the head; among the elements anchored after the current one, the **smallest**
+    /// id renders first — a deterministic order every replica agrees on without coordination
+    /// (any fixed tie-break converges; this one keeps earlier client spaces reading first).
     fn ordered(&self) -> Vec<Elem> {
         // Build the children-by-anchor index.
         let mut after_head: Vec<usize> = Vec::new();
@@ -171,21 +175,14 @@ impl TextDoc {
     }
 }
 
-fn ops_last_id(ops: &[TextOp]) -> NodeId {
-    ops.last()
-        .map(|op| match op {
-            TextOp::Ins { id, .. } => *id,
-            TextOp::Del { id } => *id,
-        })
-        .unwrap_or(NodeId(0))
-}
-
 /// The value view of a text doc for the property system.
+#[must_use]
 pub fn to_value(t: &TextDoc) -> crate::value::Value {
     crate::value::Value::Text(t.clone())
 }
 
 /// Extract a text doc from a value, if it is one.
+#[must_use]
 pub fn from_value(v: &crate::value::Value) -> Option<&TextDoc> {
     match v {
         crate::value::Value::Text(t) => Some(t),
@@ -194,11 +191,13 @@ pub fn from_value(v: &crate::value::Value) -> Option<&TextDoc> {
 }
 
 /// Text values never reference assets, but the property system needs the symmetric helper.
+#[must_use]
 pub fn no_assets(_: &TextDoc) -> Vec<AssetRef> {
     Vec::new()
 }
 
 /// A shared-text helper so adapters can name the property type.
+#[must_use]
 pub fn prop_type_name() -> Arc<str> {
     Arc::from("text")
 }
@@ -229,10 +228,12 @@ mod tests {
         for op in &ops_a {
             b.apply(op);
         }
-        // Both keep everything, in the same order — no character is lost.
+        // Both keep everything, in the same order — no character is lost. Concurrent
+        // inserts at one anchor render in ascending id order (the smaller client space
+        // first), so the merged text reads "hello world there" on both replicas —
+        // deterministic everywhere, with zero coordination.
         assert_eq!(a.render(), b.render());
-        assert!(a.render().contains("hello world"));
-        assert!(a.render().contains("hello there"));
+        assert_eq!(a.render(), "hello world there");
     }
 
     /// Deletes are tombstones: applying twice changes nothing, and compaction keeps the live.
@@ -241,6 +242,7 @@ mod tests {
         let mut t = TextDoc::new();
         let mut alloc = crate::ids::Allocator::new();
         let ops = t.local_insert(0, "abcdef", &mut alloc, 5);
+        assert_eq!(ops.len(), 6);
         assert_eq!(t.render(), "abcdef");
         let dels = t.local_delete(1, 2);
         assert_eq!(t.render(), "adef");

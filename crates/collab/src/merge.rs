@@ -52,7 +52,7 @@ pub enum Target {
 /// The merge plan: what lands automatically and what needs the owner.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MergePlan {
-    /// Changes that apply without conflict (the vast majority — spec §6.8).
+    /// `Changes` that apply without conflict (the vast majority — spec §6.8).
     pub auto: Vec<Change>,
     /// Spots both sides changed differently.
     pub conflicts: Vec<Conflict>,
@@ -65,6 +65,7 @@ pub struct MergePlan {
 /// `base` is the state at the fork point; the caller replays `branch_changes` against a copy of
 /// it to obtain the branch head. Everything the branch wrote that main has not touched since
 /// `base_seq` lands automatically; the rest are conflicts.
+#[must_use]
 pub fn three_way(base: &Replica, branch_changes: &[Change], main: &Replica, base_seq: Seq) -> MergePlan {
     // Materialize the branch head by replaying the branch over the base.
     let mut branch = base.clone();
@@ -88,20 +89,14 @@ pub fn three_way(base: &Replica, branch_changes: &[Change], main: &Replica, base
                     if base_v == Some(v) {
                         continue; // The branch did not change this property.
                     }
-                    match mn.props.get(k) {
-                        None | Some(x) if x == base_v => {
-                            // Main untouched (or agrees with base): take the branch.
-                            plan.auto.push(Change::Set { id, prop: k.clone(), value: v.clone() });
-                        }
-                        Some(mv) if mv == v => { /* Both wrote the same value: nothing to do. */ }
-                        Some(mv) => {
-                            plan.conflicts.push(Conflict {
-                                target: Target::Node(id),
-                                prop: Some(k.clone()),
-                                main: mv.clone(),
-                                branch: v.clone(),
-                            });
-                        }
+                    let main_v = mn.props.get(k);
+                    if main_v.is_none_or(|x| Some(x) == base_v) {
+                        // Main untouched (or agrees with base): take the branch.
+                        plan.auto.push(Change::Set { id, prop: k.clone(), value: v.clone() });
+                    } else if main_v != Some(v) {
+                        // Both wrote, differently: a conflict spot for the owner.
+                        let mv = main_v.cloned().unwrap_or(crate::value::Value::Json(serde_json::Value::Null));
+                        plan.conflicts.push(Conflict { target: Target::Node(id), prop: Some(k.clone()), main: mv, branch: v.clone() });
                     }
                 }
                 if bn.parent != bn0.parent && mn.parent != bn0.parent && bn.parent != mn.parent {
@@ -113,8 +108,9 @@ pub fn three_way(base: &Replica, branch_changes: &[Change], main: &Replica, base
                     });
                 }
             }
-            (Some(bn), None, Some(_)) => {
-                // The branch created the node (base didn't know it): create it on main.
+            (Some(bn), None, _) => {
+                // The branch created the node (base didn't know it): create it on main —
+                // whether main still holds a stale copy or never saw it, the create wins.
                 plan.auto.push(Change::Create {
                     id,
                     kind: bn.kind.clone(),
@@ -123,24 +119,11 @@ pub fn three_way(base: &Replica, branch_changes: &[Change], main: &Replica, base
                     props: bn.props.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
                 });
             }
-            (Some(_bn), None, None) => {
-                // Created on the branch; main deleted nothing (it never knew it) — plain create.
-                let bn = branch.node(id).expect("checked");
-                plan.auto.push(Change::Create {
-                    id,
-                    kind: bn.kind.clone(),
-                    parent: bn.parent,
-                    position: bn.position.clone(),
-                    props: bn.props.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-                });
-            }
-            (None, Some(_), None) => {
-                // The branch deleted it and so did main (or main never had it past base): fine.
-            }
-            (None, Some(bn0), Some(_)) => {
-                // The branch deleted the node: auto-delete only if main did not restructure it.
+            (None, Some(_), _) => {
+                // The branch deleted the node (main agreed, never knew it, or holds a stale
+                // copy): the branch's deletion is the intent, and property conflicts surface
+                // through the property walk above.
                 plan.auto.push(Change::Delete { id });
-                let _ = bn0;
             }
             _ => {}
         }
@@ -152,10 +135,12 @@ pub fn three_way(base: &Replica, branch_changes: &[Change], main: &Replica, base
         if base_v == Some(bv) {
             continue;
         }
-        match main.entry(entry) {
-            None | Some(x) if x == base_v => plan.auto.push(Change::Put { entry: entry.clone(), value: bv.clone() }),
-            Some(mv) if mv == bv => {}
-            Some(mv) => plan.conflicts.push(Conflict { target: Target::Entry(entry.clone()), prop: None, main: mv.clone(), branch: bv.clone() }),
+        let main_v = main.entry(entry);
+        if main_v.is_none_or(|x| Some(x) == base_v) {
+            plan.auto.push(Change::Put { entry: entry.clone(), value: bv.clone() });
+        } else if main_v != Some(bv) {
+            let mv = main_v.cloned().unwrap_or(crate::value::Value::Json(serde_json::Value::Null));
+            plan.conflicts.push(Conflict { target: Target::Entry(entry.clone()), prop: None, main: mv, branch: bv.clone() });
         }
     }
     for (k, bv) in branch.doc_props() {
@@ -163,10 +148,12 @@ pub fn three_way(base: &Replica, branch_changes: &[Change], main: &Replica, base
         if base_v == Some(bv) {
             continue;
         }
-        match main.doc_prop(k) {
-            None | Some(x) if x == base_v => plan.auto.push(Change::SetDoc { prop: k.clone(), value: bv.clone() }),
-            Some(mv) if mv == bv => {}
-            Some(mv) => plan.conflicts.push(Conflict { target: Target::Doc(k.clone()), prop: None, main: mv.clone(), branch: bv.clone() }),
+        let main_v = main.doc_prop(k);
+        if main_v.is_none_or(|x| Some(x) == base_v) {
+            plan.auto.push(Change::SetDoc { prop: k.clone(), value: bv.clone() });
+        } else if main_v != Some(bv) {
+            let mv = main_v.cloned().unwrap_or(crate::value::Value::Json(serde_json::Value::Null));
+            plan.conflicts.push(Conflict { target: Target::Doc(k.clone()), prop: None, main: mv, branch: bv.clone() });
         }
     }
     plan
@@ -186,7 +173,8 @@ pub enum ListStrategy {
     UnionKeepBoth,
 }
 
-/// Resolve one conflict per the chosen resolution (returns the change to apply).
+/// `Resolve` one conflict per the chosen resolution (returns the change to apply).
+#[must_use]
 pub fn resolve(c: &Conflict, r: &Resolution) -> Option<Change> {
     let value = match r {
         Resolution::TakeBranch => c.branch.clone(),

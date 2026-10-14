@@ -1,7 +1,7 @@
 //! # craft-collab — the generalized collaboration core
 //!
-//! The pure, network-free heart of CraftHub, extracted and generalized from the proven
-//! `figcraft-collab` core (spec §2.15): every tested semantic is kept, the FigCraft-specific
+//! The pure, network-free heart of `CraftHub`, extracted and generalized from the proven
+//! `figcraft-collab` core (spec §2.15): every tested semantic is kept, the `FigCraft`-specific
 //! document knowledge is lifted behind [`adapter::DocSchema`] so any Craft app can adapt its
 //! document to the same object/property model (GOPM — spec §3.4/§4.6).
 //!
@@ -86,7 +86,8 @@ pub enum Error {
 /// Compare secrets (tokens, keys, their hashes) without stopping at the first difference.
 ///
 /// The family's constant-time comparison, ported verbatim from figcraft-collab (spec §2.15);
-/// every token, join-code and webhook-signature comparison in CraftHub goes through it.
+/// every token, join-code and webhook-signature comparison in `CraftHub` goes through it.
+#[must_use]
 pub fn same_secret(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0

@@ -1,3 +1,6 @@
+//! (Test code: assertions may panic — that is their point.)
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 //! Fractional-indexing property tests (spec §5.2 P1-P3). Mirrors figcraft's `frac_tests.rs`.
 
 use craft_collab::frac;
@@ -43,20 +46,23 @@ fn spec_examples() {
     assert!(frac::between(Some("a2"), Some("a1")).is_err(), "bounds must be ordered");
 }
 
-/// Generated keys never end in `0` (the invariant that keeps room between keys).
+/// Generated **fractions** never end in `0` — the invariant that keeps room between keys
+/// (integer parts may: `a0` and `b00` are integer keys, and valid ones).
 #[test]
-fn keys_never_end_in_zero() {
+fn fractions_never_end_in_zero() {
     let mut k = frac::FIRST_KEY.to_string();
     for _ in 0..1_000 {
         let next = frac::between(Some(&k), None).expect("room");
-        assert!(!next.ends_with('0'), "key ends in 0: {next}");
         let mid = frac::between(Some(&k), Some(&next)).expect("mid");
-        assert!(!mid.ends_with('0'), "mid key ends in 0: {mid}");
+        // The mid key's fraction part is what never ends in 0 (validate enforces it).
+        assert!(frac::validate(&mid).is_ok(), "mid key must be valid: {mid}");
+        assert!(!mid.ends_with('0') || mid.parse::<i64>().is_ok(), "mid {mid}");
+        assert!(frac::validate(&next).is_ok(), "key must be valid: {next}");
         k = next;
     }
 }
 
-/// n_between yields exactly n keys, strictly between, in order.
+/// `n_between` yields exactly n keys, strictly between, in order.
 #[test]
 fn n_between_splits_evenly() {
     let keys = frac::n_between(Some("a1"), Some("a2"), 7).expect("keys");
@@ -71,10 +77,10 @@ fn n_between_splits_evenly() {
 /// Malformed keys are rejected by validate.
 #[test]
 fn validation_rejects_malformed() {
-    for bad in ["", "0", "a0\n", "zz", "a!", &"x".repeat(200), "a10"] {
+    for bad in ["", "0", "a0\n", "zz", "a!", &"x".repeat(200), "a10", "z11"] {
         assert!(frac::validate(bad).is_err(), "{bad:?} should be invalid");
     }
-    for good in ["a0", "a1V", "A000000000000000000000000000z", "z11"] {
+    for good in ["a0", "a1V", "A000000000000000000000000000z", "b00"] {
         assert!(frac::validate(good).is_ok(), "{good:?} should be valid");
     }
 }
@@ -97,5 +103,5 @@ fn respace_keeps_order_monotone() {
     assert!(seq.is_sorted(), "order must survive respace: {seq:?}");
     // Short keys alone trigger nothing.
     let short = vec![("a0".to_string(), 1u64), ("a1".to_string(), 2u64)];
-    assert!(frac::respace(&short).expect("respace").is_empty());
+    assert_eq!(frac::respace(&short).expect("respace"), [] as [(std::string::String, std::string::String); 0]);
 }

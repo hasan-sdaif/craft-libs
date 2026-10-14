@@ -7,8 +7,8 @@
 //! no longer applies). The convergence guarantee — `apply(diff(a, b), a) == b` — is tested over
 //! randomly generated real edits (spec §5.3).
 
-use crate::change::{Batch, Change, EntryId, Position, Seq};
 use crate::Error;
+use crate::change::{Batch, Change, EntryId, Position, Seq};
 use crate::frac;
 use crate::ids::NodeId;
 use crate::value::Value;
@@ -41,9 +41,10 @@ pub enum ApplyMode {
 /// The whole synchronized document state.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Replica {
+    /// The nodes, by id.
     nodes: BTreeMap<NodeId, Node>,
     /// Children per parent, kept ordered by `(position, id)`.
-    children: BTreeMap<NodeId, BTreeMap<(Position, NodeId), ()>>,
+    children: BTreeMap<NodeId, std::collections::BTreeSet<(Position, NodeId)>>,
     /// Document-level entries (styles, variables, comments, versions...).
     entries: BTreeMap<EntryId, Value>,
     /// Document-level properties.
@@ -56,11 +57,13 @@ pub struct Replica {
 
 impl Replica {
     /// An empty replica at seq 0.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// The highest applied server seq.
+    #[must_use]
     pub fn seq(&self) -> Seq {
         self.seq
     }
@@ -71,6 +74,7 @@ impl Replica {
     }
 
     /// Get a node.
+    #[must_use]
     pub fn node(&self, id: NodeId) -> Option<&Node> {
         self.nodes.get(&id)
     }
@@ -81,16 +85,18 @@ impl Replica {
     }
 
     /// The node count (checked against `Limits::max_nodes`).
+    #[must_use]
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
 
     /// A parent's children in `(position, id)` order.
     pub fn children(&self, parent: NodeId) -> impl Iterator<Item = NodeId> + '_ {
-        self.children.get(&parent).into_iter().flat_map(|m| m.keys().map(|(_, id)| *id))
+        self.children.get(&parent).into_iter().flat_map(|m| m.iter().map(|(_, id)| *id))
     }
 
     /// A document-level entry.
+    #[must_use]
     pub fn entry(&self, id: &EntryId) -> Option<&Value> {
         self.entries.get(id)
     }
@@ -101,6 +107,7 @@ impl Replica {
     }
 
     /// A document-level property.
+    #[must_use]
     pub fn doc_prop(&self, name: &str) -> Option<&Value> {
         self.doc.get(name)
     }
@@ -111,6 +118,7 @@ impl Replica {
     }
 
     /// Whether an id was removed earlier in the session (its re-Create is accepted, spec §2.2).
+    #[must_use]
     pub fn was_removed(&self, id: NodeId) -> bool {
         self.removed.contains(&id)
     }
@@ -125,7 +133,7 @@ impl Replica {
         }
         frac::validate(&position).map_err(|e| Error::Invalid(e.to_string()))?;
         let node = Node { kind, parent, position: position.clone(), props: props.into_iter().collect() };
-        self.children.entry(parent).or_default().insert((position, id), ());
+        self.children.entry(parent).or_default().insert((position, id));
         self.nodes.insert(id, node);
         self.removed.remove(&id);
         Ok(())
@@ -151,34 +159,45 @@ impl Replica {
                 if self.would_cycle(id, new_parent) {
                     return Err(Error::Invalid("the move would create a cycle".into()));
                 }
-                let old = node.parent;
-                let pos = node.position.clone();
-                node.parent = new_parent;
-                if let Some(m) = self.children.get_mut(&old) {
+                // Read what we need, then re-borrow: the cycle check above borrows self immutably.
+                let (old_parent, pos) = {
+                    let node = self.nodes.get(&id).ok_or(Error::Unknown(id))?;
+                    (node.parent, node.position.clone())
+                };
+                if let Some(m) = self.children.get_mut(&old_parent) {
                     m.remove(&(pos.clone(), id));
                     if m.is_empty() {
-                        self.children.remove(&old);
+                        self.children.remove(&old_parent);
                     }
                 }
-                self.children.entry(new_parent).or_default().insert((pos, id), ());
+                self.children.entry(new_parent).or_default().insert((pos, id));
+                if let Some(node) = self.nodes.get_mut(&id) {
+                    node.parent = new_parent;
+                }
             }
             "position" => {
                 let Value::Json(serde_json::Value::String(p)) = &value else {
                     return Err(Error::Invalid("position must be a string key".into()));
                 };
                 frac::validate(p).map_err(|e| Error::Invalid(e.to_string()))?;
-                let node = self.nodes.get(&id).ok_or(Error::Unknown(id))?;
-                let (old_parent, old_pos) = (node.parent, node.position.clone());
+                let (old_parent, _) = {
+                    let node = self.nodes.get(&id).ok_or(Error::Unknown(id))?;
+                    (node.parent, node.position.clone())
+                };
                 let new_pos = p.clone();
                 if let Some(m) = self.children.get_mut(&old_parent) {
-                    m.remove(&(old_pos, id));
-                    if m.is_empty() {
-                        self.children.remove(&old_parent);
+                    let old_key = m.iter().find(|(_, nid)| *nid == id).cloned();
+                    if let Some((old_pos, _)) = old_key {
+                        m.remove(&(old_pos, id));
+                        if m.is_empty() {
+                            self.children.remove(&old_parent);
+                        }
                     }
                 }
-                self.children.entry(old_parent).or_default().insert((new_pos.clone(), id), ());
-                let node = self.nodes.get_mut(&id).ok_or(Error::Unknown(id))?;
-                node.position = new_pos;
+                self.children.entry(old_parent).or_default().insert((new_pos.clone(), id));
+                if let Some(node) = self.nodes.get_mut(&id) {
+                    node.position = new_pos;
+                }
             }
             _ => {
                 node.props.insert(Arc::from(prop), value);
@@ -203,7 +222,7 @@ impl Replica {
                     }
                 }
                 if let Some(kids) = self.children.remove(&cur) {
-                    stack.extend(kids.keys().map(|(_, cid)| *cid));
+                    stack.extend(kids.iter().map(|(_, cid)| *cid));
                 }
             }
         }
@@ -240,7 +259,7 @@ impl Replica {
             }
             Change::Set { id, prop, value } => match self.set(*id, prop, value.clone()) {
                 Ok(()) => Ok(true),
-                Err(Error::Unknown(n)) if mode == ApplyMode::Lenient => Ok(false),
+                Err(Error::Unknown(_n)) if mode == ApplyMode::Lenient => Ok(false),
                 Err(e) => Err(e),
             },
             Change::Delete { id } => {
@@ -294,10 +313,7 @@ impl Replica {
     ///
     /// Returns the changes to broadcast (position writes ride an ordinary batch).
     pub fn respace_children(&mut self, parent: NodeId, author_space: u32, batch_id: crate::change::BatchId, base_seq: Seq) -> Option<Batch> {
-        let keys: Vec<(String, u64)> = self
-            .children(parent)
-            .filter_map(|id| self.node(id).map(|n| (n.position.clone(), id.0)))
-            .collect();
+        let keys: Vec<(String, u64)> = self.children(parent).filter_map(|id| self.node(id).map(|n| (n.position.clone(), id.0))).collect();
         let pairs = frac::respace(&keys).ok()?;
         if pairs.is_empty() {
             return None;
@@ -305,9 +321,7 @@ impl Replica {
         let changes = pairs
             .into_iter()
             .filter_map(|(old, new)| {
-                let id = self
-                    .children(parent)
-                    .find(|cid| self.node(*cid).is_some_and(|n| n.position == old))?;
+                let id = self.children(parent).find(|cid| self.node(*cid).is_some_and(|n| n.position == old))?;
                 Some(Change::Set { id, prop: Arc::from("position"), value: Value::Json(serde_json::Value::String(new)) })
             })
             .collect::<Vec<_>>();

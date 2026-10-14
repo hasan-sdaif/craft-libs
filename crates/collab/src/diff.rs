@@ -14,20 +14,11 @@ use crate::replica::Replica;
 use crate::value::Value;
 use std::sync::Arc;
 
-/// The unordered shape of one node's difference.
-#[derive(Debug)]
-struct NodeDiff {
-    id: NodeId,
-    kind: Option<Arc<str>>,
-    parent: Option<NodeId>,
-    position: Option<String>,
-    prop_writes: Vec<(Arc<str>, Value)>,
-}
-
 /// Compute the ordered batch that turns `before` into `after` (spec §5.3).
 ///
 /// `author` is the client space new ids belong to (already allocated by the caller); `batch_id`
 /// and `base_seq` ride the returned batch.
+#[must_use]
 pub fn diff(before: &Replica, after: &Replica, author: u32, batch_id: BatchId, base_seq: Seq) -> Batch {
     let mut creates: Vec<Change> = Vec::new();
     let mut writes: Vec<Change> = Vec::new();

@@ -54,6 +54,7 @@ pub enum CodeError {
 }
 
 /// Normalize raw typed input: uppercase, strip spaces and dashes, map O→0 and I/L→1.
+#[must_use]
 pub fn normalize(raw: &str) -> String {
     raw.chars()
         .filter(|c| !c.is_whitespace() && *c != '-')
@@ -72,23 +73,23 @@ fn encode_bits(bits: &[u8]) -> String {
 
 /// Decode Crockford characters back to 5-bit groups (already normalized input).
 fn decode_bits(s: &str) -> Option<Vec<u8>> {
-    s.bytes()
-        .map(|c| ALPHABET.iter().position(|d| *d == c).map(|p| p as u8))
-        .collect()
+    // The alphabet holds 32 entries, so every found position fits a u8 by construction.
+    s.bytes().map(|c| ALPHABET.iter().position(|d| *d == c).and_then(|p| u8::try_from(p).ok())).collect()
 }
 
 /// An online code: 9 characters from 45 random bits (spec §6.4).
 ///
 /// `entropy` must be cryptographically random (the caller injects its `Rng` — this function is
 /// pure and deterministic so tests stay reproducible).
+#[must_use]
 pub fn encode_online(entropy45: u64) -> String {
     // Pack the 45 bits into 5-bit groups, most significant first.
     let mut groups: Vec<u8> = Vec::with_capacity(9);
     for g in 0..9 {
         let mut v = 0u8;
         for b in 0..5 {
-            let idx = g * 5 + b;
-            v = (v << 1) | bits.get(idx).copied().unwrap_or(0);
+            let bit = (entropy45 >> (44 - (g * 5 + b))) & 1;
+            v = (v << 1) | bit as u8;
         }
         groups.push(v);
     }
@@ -120,6 +121,7 @@ fn lan_check(host: [u8; 4], port: u16, secret44: u64) -> u8 {
 }
 
 /// A local (LAN) code: 20 characters = host 32 + port 16 + secret 44 + check 8 (spec §6.4).
+#[must_use]
 pub fn encode_local(host: [u8; 4], port: u16, secret44: u64) -> String {
     let check = lan_check(host, port, secret44);
     let mut bits: Vec<bool> = Vec::with_capacity(100);
@@ -152,10 +154,11 @@ pub fn decode_local(raw: &str) -> Result<([u8; 4], u16, u64), CodeError> {
         v = (v << 5) | u128::from(*g);
     }
     v &= (1 << 100) - 1;
-    let host = ((v >> 68) as u32).to_be_bytes();
-    let port = (v >> 52) as u16;
-    let secret = ((v >> 8) as u64) & ((1 << 44) - 1);
-    let check = v as u8;
+    let host = ((v >> 68) & 0xFFFF_FFFF) as u32;
+    let host = host.to_be_bytes();
+    let port = ((v >> 52) & 0xFFFF) as u16;
+    let secret = ((v >> 8) & ((1u128 << 44) - 1)) as u64;
+    let check = (v & 0xFF) as u8;
     if lan_check(host, port, secret) != check {
         return Err(CodeError::CheckFailed);
     }
@@ -172,6 +175,7 @@ fn push_bits(out: &mut Vec<bool>, value: u64, width: usize) {
 /// returning `(lookup_hash, pad_hash)` — one finds the link, the other wraps its token.
 ///
 /// Pure over injected SHA-256 state so tests are deterministic.
+#[must_use]
 pub fn stretch(code: &str) -> (String, String) {
     let labelled = format!("{CODE_LABEL}{code}");
     let h1 = Sha256::digest(labelled.as_bytes());
@@ -195,20 +199,75 @@ struct Sha256([u8; 32]);
 
 impl Sha256 {
     const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        0x428a_2f98,
+        0x7137_4491,
+        0xb5c0_fbcf,
+        0xe9b5_dba5,
+        0x3956_c25b,
+        0x59f1_11f1,
+        0x923f_82a4,
+        0xab1c_5ed5,
+        0xd807_aa98,
+        0x1283_5b01,
+        0x2431_85be,
+        0x550c_7dc3,
+        0x72be_5d74,
+        0x80de_b1fe,
+        0x9bdc_06a7,
+        0xc19b_f174,
+        0xe49b_69c1,
+        0xefbe_4786,
+        0x0fc1_9dc6,
+        0x240c_a1cc,
+        0x2de9_2c6f,
+        0x4a74_84aa,
+        0x5cb0_a9dc,
+        0x76f9_88da,
+        0x983e_5152,
+        0xa831_c66d,
+        0xb003_27c8,
+        0xbf59_7fc7,
+        0xc6e0_0bf3,
+        0xd5a7_9147,
+        0x06ca_6351,
+        0x1429_2967,
+        0x27b7_0a85,
+        0x2e1b_2138,
+        0x4d2c_6dfc,
+        0x5338_0d13,
+        0x650a_7354,
+        0x766a_0abb,
+        0x81c2_c92e,
+        0x9272_2c85,
+        0xa2bf_e8a1,
+        0xa81a_664b,
+        0xc24b_8b70,
+        0xc76c_51a3,
+        0xd192_e819,
+        0xd699_0624,
+        0xf40e_3585,
+        0x106a_a070,
+        0x19a4_c116,
+        0x1e37_6c08,
+        0x2748_774c,
+        0x34b0_bcb5,
+        0x391c_0cb3,
+        0x4ed8_aa4a,
+        0x5b9c_ca4f,
+        0x682e_6ff3,
+        0x748f_82ee,
+        0x78a5_636f,
+        0x84c8_7814,
+        0x8cc7_0208,
+        0x90be_fffa,
+        0xa450_6ceb,
+        0xbef9_a3f7,
+        0xc671_78f2,
     ];
 
+    #[allow(clippy::many_single_char_names, clippy::needless_range_loop, clippy::indexing_slicing)]
     fn digest(data: &[u8]) -> Self {
-        let mut h: [u32; 8] = [
-            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-        ];
+        let mut h: [u32; 8] = [0x6a09_e667, 0xbb67_ae85, 0x3c6e_f372, 0xa54f_f53a, 0x510e_527f, 0x9b05_688c, 0x1f83_d9ab, 0x5be0_cd19];
         let mut msg = data.to_vec();
         let bit_len = (data.len() as u64).wrapping_mul(8);
         msg.push(0x80);
@@ -224,21 +283,13 @@ impl Sha256 {
             for i in 16..64 {
                 let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
                 let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-                w[i] = w[i - 16]
-                    .wrapping_add(s0)
-                    .wrapping_add(w[i - 7])
-                    .wrapping_add(s1);
+                w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
             }
-            let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
-                (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+            let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) = (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
             for i in 0..64 {
                 let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
                 let ch = (e & f) ^ ((!e) & g);
-                let t1 = hh
-                    .wrapping_add(s1)
-                    .wrapping_add(ch)
-                    .wrapping_add(Self::K[i])
-                    .wrapping_add(w[i]);
+                let t1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(Self::K[i]).wrapping_add(w[i]);
                 let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
                 let maj = (a & b) ^ (a & c) ^ (b & c);
                 let t2 = s0.wrapping_add(maj);
@@ -268,7 +319,13 @@ impl Sha256 {
     }
 
     fn hex(s: &Self) -> String {
-        s.0.iter().map(|b| format!("{b:02x}")).collect()
+        use std::fmt::Write as _;
+        // A digest is always 32 bytes -> 64 hex chars; write! avoids the per-byte allocation.
+        let mut out = String::with_capacity(64);
+        for b in s.0 {
+            let _ = write!(out, "{b:02x}");
+        }
+        out
     }
 }
 
@@ -297,11 +354,11 @@ mod tests {
     /// LAN codes catch typos via the check byte before any connection (spec §6.4).
     #[test]
     fn local_roundtrip_and_check() {
-        let code = encode_local([192, 168, 1, 20], 47900, 0xABCDEF123);
+        let code = encode_local([192, 168, 1, 20], 47900, 0x0ABC_DEF123);
         let (host, port, secret) = decode_local(&code).expect("decode");
         assert_eq!(host, [192, 168, 1, 20]);
         assert_eq!(port, 47900);
-        assert_eq!(secret, 0xABCDEF123);
+        assert_eq!(secret, 0x0ABC_DEF123);
         // Flip one character: the check must catch it (probabilistically certain for a single
         // char swap within the payload).
         let mut broken = normalize(&code);

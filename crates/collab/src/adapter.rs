@@ -90,9 +90,9 @@ pub struct ViewNode {
 /// What applying a batch did (for the caller's bookkeeping).
 #[derive(Clone, Debug, Default)]
 pub struct ApplyReport {
-    /// Changes that applied.
+    /// `Changes` that applied.
     pub applied: usize,
-    /// Changes skipped (lenient mode — deleted targets and the like).
+    /// `Changes` skipped (lenient mode — deleted targets and the like).
     pub skipped: usize,
     /// Follow-up recomputes the author should compose (spec §5.7).
     pub follow_up: Vec<Change>,
@@ -111,10 +111,10 @@ pub struct UiState {
     pub viewport: Option<(f64, f64, f64, f64)>,
     /// Editing a text object: node + caret + selection.
     pub editing_text: Option<(NodeId, usize, Option<usize>)>,
-    /// The playhead position for timeline apps (FilmCraft/EffectCraft).
+    /// The playhead position for timeline apps (`FilmCraft`/`EffectCraft`).
     pub playhead: Option<u64>,
     /// The track range being edited.
     pub track_range: Option<(u32, u64, u64)>,
-    /// A generation job in flight (ArtCraft: job id + model).
+    /// A generation job in flight (`ArtCraft`: job id + model).
     pub generating: Option<(String, String)>,
 }

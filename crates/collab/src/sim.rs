@@ -17,23 +17,24 @@ pub struct Rng(u64);
 
 impl Rng {
     /// A seeded generator.
+    #[must_use]
     pub fn new(seed: u64) -> Self {
         Rng(seed.max(1))
     }
 
     /// The next value.
-    pub fn next(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x >> 12;
         x ^= x << 25;
         x ^= x >> 27;
         self.0 = x;
-        x.wrapping_mul(0x2545F4914F6CDD1D)
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
 
     /// A value below `n` (slightly biased for huge `n`; fine for simulation).
     pub fn below(&mut self, n: u64) -> u64 {
-        self.next() % n.max(1)
+        self.next_u64() % n.max(1)
     }
 
     /// True with probability `num/den`.
@@ -78,6 +79,7 @@ pub struct SimClient {
 
 impl World {
     /// A world of `n` clients over an empty document, seeded for reproducibility.
+    #[must_use]
     pub fn new(n: usize, seed: u64) -> Self {
         let mut server = Server::new(seed);
         let clients = (0..n)
@@ -90,23 +92,25 @@ impl World {
     }
 
     /// The simulated clock.
+    #[must_use]
     pub fn time(&self) -> u64 {
         self.time
     }
 
     /// Compose a random small edit as a batch from client `ci` against its own replica.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn random_edit(&mut self, ci: usize) -> Option<Batch> {
-        let client = self.clients.get_mut(ci)?;
-        if !client.connected {
-            return None;
-        }
-        let space = client.id.0;
+        let (space, first_node, base_seq) = {
+            let client = self.clients.get_mut(ci)?;
+            if !client.connected {
+                return None;
+            }
+            (client.id.0, client.next_node, client.seq)
+        };
         let mut changes = Vec::new();
         let count = 1 + self.rng.below(3) as usize;
-        for _ in 0..count {
-            let client = self.clients.get_mut(ci).expect("checked above");
-            let n = client.next_node;
-            client.next_node += 1;
+        for i in 0..count {
+            let n = first_node + i as u64;
             let id = crate::ids::NodeId::compose(space, n as u32);
             let kind: std::sync::Arc<str> = std::sync::Arc::from("rect");
             let position = crate::frac::between(None, None).ok()?;
@@ -116,7 +120,10 @@ impl World {
             ];
             changes.push(Change::Create { id, kind, parent: crate::ids::NodeId(0), position, props });
         }
-        let batch = Batch { id: self.next_batch_id, base_seq: client.seq, changes };
+        if let Some(client) = self.clients.get_mut(ci) {
+            client.next_node = first_node + count as u64;
+        }
+        let batch = Batch { id: self.next_batch_id, base_seq, changes };
         self.next_batch_id += 1;
         Some(batch)
     }
@@ -169,7 +176,7 @@ impl World {
         }
         let mut broadcasts: Vec<(Seq, ClientId, Batch)> = Vec::new();
         for f in arrived {
-            if let Outcome::Accepted { seq } = self.server.submit(f.from, f.batch) {
+            if let Outcome::Accepted { seq } = self.server.submit(f.from, &f.batch) {
                 let log = self.server.log_after(seq - 1);
                 if let Some((s, a, b)) = log.into_iter().next() {
                     broadcasts.push((s, a, b));
@@ -195,12 +202,12 @@ impl World {
     }
 
     /// Randomly disconnect/reconnect a client; reconnection catches up on everything missed
-    /// (the Welcome delta, spec §2.10) and replays the offline queue.
+    /// (the `Welcome` delta, spec §2.10) and replays the offline queue.
     pub fn churn(&mut self) {
         if self.clients.is_empty() {
             return;
         }
-        let ci = self.rng.below(self.clients.len() as u64) as usize;
+        let ci = usize::try_from(self.rng.below(self.clients.len() as u64)).unwrap_or(0);
         if let Some(client) = self.clients.get_mut(ci)
             && client.connected
             && self.rng.chance(1, 50)
@@ -234,6 +241,7 @@ impl World {
     }
 
     /// Whether every replica equals the server's state (quiescence convergence, spec §5.5).
+    #[must_use]
     pub fn converged(&self) -> bool {
         let server_state = self.server.state();
         self.clients.iter().all(|c| replicas_equal(&c.replica, server_state))
@@ -260,6 +268,7 @@ impl World {
 }
 
 /// Structural equality of two replicas by their rendered shape (nodes, entries, doc, children).
+#[must_use]
 pub fn replicas_equal(a: &Replica, b: &Replica) -> bool {
     if a.node_count() != b.node_count() {
         return false;

@@ -1,6 +1,6 @@
 //! Ephemeral presence (spec §6.1): cursors, selections, viewports, per-app projections.
 //!
-//! Presence is never stored — the server forwards the latest value per client (rate-shaped at
+//! `Presence` is never stored — the server forwards the latest value per client (rate-shaped at
 //! ~30 Hz, last-wins, sanitized) and forgets it the moment the connection drops. The only
 //! exception in the whole system is "who is spotlighting", which the server keeps long enough
 //! to tell late joiners (spec §2.7). Everything here rides the wire as transient messages and
@@ -26,7 +26,7 @@ pub struct PresenceMsg {
     pub playhead: Option<u64>,
     /// Timeline apps: the track range being edited.
     pub track_range: Option<(u32, u64, u64)>,
-    /// ArtCraft: a generation job is in flight (job id, model).
+    /// `ArtCraft`: a generation job is in flight (job id, model).
     pub generating: Option<(String, String)>,
 }
 
@@ -35,8 +35,9 @@ pub struct PresenceMsg {
 pub struct PresenceGuard {
     seen_per_second: std::collections::HashMap<ClientId, u32>,
     window_start: u64,
-    /// The presence rate budget: 30 messages/second on average (burst 60).
+    /// The presence rate budget: 30 messages/second on average.
     pub rate_per_second: u32,
+    /// The burst allowance above the average rate.
     pub burst: u32,
     /// Selections are bounded (v2: 10,000 ids).
     pub max_selection: usize,
@@ -50,6 +51,7 @@ impl Default for PresenceGuard {
 
 impl PresenceGuard {
     /// A new guard.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -67,10 +69,10 @@ impl PresenceGuard {
         }
         *budget += 1;
         // Sanitize: numbers finite, selections bounded (spec §6.1 `sanitize`).
-        if let Some((x, y)) = msg.cursor {
-            if !x.is_finite() || !y.is_finite() {
-                msg.cursor = None;
-            }
+        if let Some((x, y)) = msg.cursor
+            && (!x.is_finite() || !y.is_finite())
+        {
+            msg.cursor = None;
         }
         if msg.selection.len() > self.max_selection {
             msg.selection.truncate(self.max_selection);

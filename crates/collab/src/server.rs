@@ -8,10 +8,10 @@
 //! adapter's [`DocSchema`]. The [`SessionState`] is one serde value a standalone server stores
 //! as a snapshot per file with a journal of accepted batches after it (spec §6.3).
 
+use crate::Error;
 use crate::change::{Batch, BatchId, Change, Seq};
 use crate::ids::ClientId;
 use crate::replica::{ApplyMode, Replica};
-use crate::Error;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -23,7 +23,7 @@ pub enum Outcome {
         /// The granted sequence number.
         seq: Seq,
     },
-    /// Refused: a short human reason plus the current values for every touched target.
+    /// `Refused`: a short human reason plus the current values for every touched target.
     Refused {
         /// Why (English source text; clients translate by matching the reason key, spec §15.2).
         reason: String,
@@ -90,49 +90,46 @@ pub struct Server {
 
 impl Server {
     /// A fresh server for an empty document (a host starting a local session).
+    #[must_use]
     pub fn new(session: u64) -> Self {
         Self::with_replica(session, Replica::new())
     }
 
     /// A server over an existing document state (a standalone server opening a file).
+    #[must_use]
     pub fn with_replica(session: u64, replica: Replica) -> Self {
         let used_spaces = replica.nodes().map(|(id, _)| id.space()).collect::<Vec<_>>();
-        Self {
-            state: replica,
-            session,
-            client_counter: 0,
-            clients: HashMap::new(),
-            log: Vec::new(),
-            used_spaces,
-        }
+        Self { state: replica, session, client_counter: 0, clients: HashMap::new(), log: Vec::new(), used_spaces }
     }
 
     /// The session id.
+    #[must_use]
     pub fn session(&self) -> u64 {
         self.session
     }
 
     /// The current replica state.
+    #[must_use]
     pub fn state(&self) -> &Replica {
         &self.state
     }
 
     /// The accepted log (after `seq`, for Delta catch-up, spec §2.10).
+    #[must_use]
     pub fn log_after(&self, seq: Seq) -> Vec<(Seq, ClientId, Batch)> {
         self.log.iter().filter(|(s, _, _)| *s > seq).cloned().collect()
     }
 
     /// Whether the log still holds every batch after `seq` (else the welcome is a Snapshot).
+    #[must_use]
     pub fn log_covers(&self, seq: Seq) -> bool {
         self.log.first().is_none_or(|(s, _, _)| *s > seq)
     }
 
     /// Join a client: grant a fresh id above every used space (spec §5.1).
     pub fn join_as(&mut self, access: Access) -> ClientId {
-        let mut alloc = crate::ids::Allocator::new();
-        let id = alloc
-            .next_client_id(&self.used_spaces, self.client_counter)
-            .unwrap_or(ClientId(self.client_counter));
+        let alloc = crate::ids::Allocator::new();
+        let id = alloc.next_client_id(&self.used_spaces, self.client_counter).unwrap_or(ClientId(self.client_counter));
         self.client_counter = id.0;
         self.clients.insert(id, ClientRecord { id, access, last_batch: None, refused: Vec::new() });
         id
@@ -162,13 +159,14 @@ impl Server {
     }
 
     /// The record of a joined client (its processed/refused state, spec §2.10).
+    #[must_use]
     pub fn client_record(&self, client: ClientId) -> Option<&ClientRecord> {
         self.clients.get(&client)
     }
 
     /// Submit a batch: fast checks first, then whole-batch validation on a scratch copy, then an
     /// atomic accept with the next seq — or a refusal with fixes (spec §5.4, verbatim contract).
-    pub fn submit(&mut self, from: ClientId, batch: Batch) -> Outcome {
+    pub fn submit(&mut self, from: ClientId, batch: &Batch) -> Outcome {
         let Some(record) = self.clients.get(&from) else {
             return Outcome::Refused { reason: "not joined".into(), fixes: Vec::new() };
         };
@@ -188,10 +186,10 @@ impl Server {
             return Outcome::Refused { reason: "the batch is larger than the limit".into(), fixes: Vec::new() };
         }
         for c in &batch.changes {
-            if let Change::Set { value, .. } | Change::SetDoc { value, .. } | Change::Put { value, .. } = c {
-                if !json_is_finite(value) {
-                    return Outcome::Refused { reason: "a value is not finite or is out of range".into(), fixes: Vec::new() };
-                }
+            if let Change::Set { value, .. } | Change::SetDoc { value, .. } | Change::Put { value, .. } = c
+                && !json_is_finite(value)
+            {
+                return Outcome::Refused { reason: "a value is not finite or is out of range".into(), fixes: Vec::new() };
             }
         }
         // Deep validation on a scratch copy (spec §5.4 step 2), collecting touched current values.
@@ -201,18 +199,18 @@ impl Server {
             match c {
                 Change::Create { id, parent, .. } => {
                     if scratch.node(*id).is_some() && !scratch.was_removed(*id) {
-                        return self.refuse(touched, "the object already exists");
+                        return Self::refuse(touched, "the object already exists");
                     }
                     if id.space() != from.0 && !self.state.was_removed(*id) {
-                        return self.refuse(touched, "the id is from another client's space");
+                        return Self::refuse(touched, "the id is from another client's space");
                     }
                     if scratch.node(*parent).is_none() && *parent != crate::ids::NodeId(0) {
-                        return self.refuse(touched, "a layer you are changing was deleted by someone else");
+                        return Self::refuse(touched, "a layer you are changing was deleted by someone else");
                     }
                 }
                 Change::Set { id, prop, .. } => {
                     let Some(node) = scratch.node(*id) else {
-                        return self.refuse(touched, "a layer you are changing was deleted by someone else");
+                        return Self::refuse(touched, "a layer you are changing was deleted by someone else");
                     };
                     if prop.as_ref() != "parent" && prop.as_ref() != "position" {
                         if let Some(cur) = node.props.get(prop.as_ref()) {
@@ -221,18 +219,24 @@ impl Server {
                             touched.push(Change::Set { id: *id, prop: prop.clone(), value: crate::value::Value::Json(serde_json::Value::Null) });
                         }
                     } else if prop.as_ref() == "parent" {
-                        touched.push(Change::Set { id: *id, prop: prop.clone(), value: crate::value::Value::Json(serde_json::Value::Number((node.parent.0).into())) });
+                        touched.push(Change::Set {
+                            id: *id,
+                            prop: prop.clone(),
+                            value: crate::value::Value::Json(serde_json::Value::Number((node.parent.0).into())),
+                        });
                     }
                 }
                 Change::Delete { .. } | Change::SetDoc { .. } | Change::Put { .. } | Change::Remove { .. } => {}
             }
-            if scratch.apply_one_for_server(c).is_err() {
-                return self.refuse(touched, "the change does not apply to the current state");
+            if let Err(e) = scratch.apply_one_for_server(c) {
+                // The specific reason survives: "the move would create a cycle", "a layer
+                // you are changing was deleted by someone else"... (spec §5.4's messages).
+                return Self::refuse(touched, &e.to_string());
             }
         }
         // Atomic accept (spec §5.4 step 3).
         let seq = self.state.seq() + 1;
-        let _ = scratch.set_seq(seq);
+        let () = scratch.set_seq(seq);
         self.state = scratch;
         // The log is bounded by the persistence layer's compaction policy (spec §6.3).
         self.log.push((seq, from, batch.clone()));
@@ -244,11 +248,12 @@ impl Server {
 
     /// Refuse with the current values of everything the batch touched (the `fixes` the client
     /// applies to reconcile — spec §5.4: "reason + fixes", never a silent refusal).
-    fn refuse(&self, touched: Vec<Change>, reason: &str) -> Outcome {
+    fn refuse(touched: Vec<Change>, reason: &str) -> Outcome {
         Outcome::Refused { reason: reason.to_string(), fixes: touched }
     }
 
     /// Serialize the whole session for persistence (spec §6.3 — snapshot per file).
+    #[must_use]
     pub fn state_out(&self) -> SessionState {
         SessionState {
             replica: self.state.clone(),
@@ -261,20 +266,14 @@ impl Server {
     }
 
     /// Restore from a saved state (spec §6.3 — replay journal entries after this).
+    #[must_use]
     pub fn restore(state: SessionState) -> Self {
         let used_spaces = state.replica.nodes().map(|(id, _)| id.space()).collect::<Vec<_>>();
         let mut clients = HashMap::new();
         for c in state.clients {
             clients.insert(c.id, c);
         }
-        Self {
-            state: state.replica,
-            session: state.session,
-            client_counter: state.client_counter,
-            clients,
-            log: Vec::new(),
-            used_spaces,
-        }
+        Self { state: state.replica, session: state.session, client_counter: state.client_counter, clients, log: Vec::new(), used_spaces }
     }
 }
 
@@ -288,9 +287,7 @@ fn json_is_finite(v: &crate::value::Value) -> bool {
 
 fn json_number_finite(j: &serde_json::Value) -> bool {
     match j {
-        serde_json::Value::Number(n) => n
-            .as_f64()
-            .is_none_or(|x| x.is_finite()),
+        serde_json::Value::Number(n) => n.as_f64().is_none_or(f64::is_finite),
         serde_json::Value::Array(a) => a.iter().all(json_number_finite),
         serde_json::Value::Object(o) => o.values().all(json_number_finite),
         _ => true,

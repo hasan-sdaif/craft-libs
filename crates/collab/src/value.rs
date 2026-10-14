@@ -19,7 +19,12 @@ pub struct AssetRef {
 }
 
 /// A property value.
-#[derive(Clone, Serialize, Deserialize, Debug)]
+///
+/// On the wire (postcard, spec §2.1) every value rides as **compact JSON text** — the v2
+/// decision verbatim ("property values inside it are compact JSON text"), which also keeps
+/// decimal rotation exact through `float_roundtrip`. The custom serde impl below is that
+/// contract.
+#[derive(Clone, Debug)]
 pub enum Value {
     /// A JSON value (the default for every property).
     Json(serde_json::Value),
@@ -27,6 +32,25 @@ pub enum Value {
     AssetRef(AssetRef),
     /// An RGA text value (feature word `textcrdt`, spec §6.6) for fine-grained concurrent writing.
     Text(TextDoc),
+}
+
+impl Serialize for Value {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_wire_json())
+    }
+}
+
+impl<'de> Deserialize<'de> for Value {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        Value::from_wire_json(&text).ok_or_else(|| serde::de::Error::custom("malformed value wire json"))
+    }
 }
 
 impl PartialEq for Value {
@@ -41,7 +65,39 @@ impl PartialEq for Value {
 }
 
 impl Value {
+    /// The compact JSON text this value rides the wire as (spec §2.1).
+    #[must_use]
+    pub fn to_wire_json(&self) -> String {
+        match self {
+            Value::Json(v) => v.to_string(),
+            Value::AssetRef(r) => serde_json::json!({ "$asset": { "sha256": r.sha256, "bytes": r.bytes } }).to_string(),
+            Value::Text(t) => serde_json::json!({ "$text": t }).to_string(),
+        }
+    }
+
+    /// Parse a value from its wire JSON text (the exact inverse of [`Value::to_wire_json`]).
+    #[must_use]
+    pub fn from_wire_json(text: &str) -> Option<Self> {
+        let v: serde_json::Value = serde_json::from_str(text).ok()?;
+        match &v {
+            serde_json::Value::Object(m) => {
+                if let Some(asset) = m.get("$asset") {
+                    let sha256 = asset.get("sha256")?.as_str()?.to_string();
+                    let bytes = asset.get("bytes")?.as_u64()?;
+                    return Some(Value::AssetRef(AssetRef { sha256, bytes }));
+                }
+                if let Some(text) = m.get("$text") {
+                    let doc: TextDoc = serde_json::from_value(text.clone()).ok()?;
+                    return Some(Value::Text(doc));
+                }
+                Some(Value::Json(v))
+            }
+            _ => Some(Value::Json(v)),
+        }
+    }
+
     /// The JSON view of this value (asset refs and text render to their JSON form).
+    #[must_use]
     pub fn to_json(&self) -> serde_json::Value {
         match self {
             Value::Json(v) => v.clone(),
@@ -51,6 +107,7 @@ impl Value {
     }
 
     /// A clone that never deep-copies large JSON more than once (Arc the big strings).
+    #[must_use]
     pub fn shared(self) -> Self {
         match self {
             Value::Json(v) => Value::Json(v),

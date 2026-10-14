@@ -17,43 +17,50 @@ use std::sync::Arc;
 /// creating a style in the same instant both keep theirs. Objects inside an entry (modes of a
 /// collection, values per mode, replies of a thread) are not independent objects — concurrent
 /// writes to different slots of the same entry resolve LWW on the whole entry.
-#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Debug, PartialOrd, Ord)]
 pub struct EntryId(pub Arc<str>);
 
 impl EntryId {
     /// A style entry (`S:<n>` in v2).
+    #[must_use]
     pub fn style(n: u64) -> Self {
         EntryId(Arc::from(format!("S:{n}")))
     }
     /// A variable id (`VariableID:<n>`).
+    #[must_use]
     pub fn variable(n: u64) -> Self {
         EntryId(Arc::from(format!("VariableID:{n}")))
     }
     /// A variable collection (`VariableCollectionId:<n>`).
+    #[must_use]
     pub fn collection(n: u64) -> Self {
         EntryId(Arc::from(format!("VariableCollectionId:{n}")))
     }
     /// A mode of a collection (`<collection>/mode<n>`).
+    #[must_use]
     pub fn mode(collection: u64, n: u64) -> Self {
         EntryId(Arc::from(format!("VariableCollectionId:{collection}/mode{n}")))
     }
     /// A comment thread by number.
+    #[must_use]
     pub fn comment(n: u64) -> Self {
         EntryId(Arc::from(format!("Comment:{n}")))
     }
 
     /// The numeric tail of the entry id (the digits at the end), if any.
     fn numeric_tail(&self) -> Option<u64> {
-        let digits: String = self.0.chars().rev().take_while(|c| c.is_ascii_digit()).collect::<String>().chars().rev().collect();
+        let digits: String = self.0.chars().rev().take_while(char::is_ascii_digit).collect::<String>().chars().rev().collect();
         if digits.is_empty() { None } else { digits.parse().ok() }
     }
 
     /// The client space this entry was created in (the tail's high 32 bits), for server checks.
+    #[must_use]
     pub fn space(&self) -> Option<u32> {
         self.numeric_tail().map(|v| (v >> 32) as u32)
     }
 
     /// The numeric tail itself.
+    #[must_use]
     pub fn number(&self) -> Option<u64> {
         self.numeric_tail()
     }
@@ -121,6 +128,7 @@ pub enum Change {
 
 impl Change {
     /// The object touched by this change, if any (used for region-lock scoping, spec §6.7).
+    #[must_use]
     pub fn target_node(&self) -> Option<NodeId> {
         match self {
             Change::Create { id, .. } | Change::Set { id, .. } | Change::Delete { id } => Some(*id),
@@ -129,6 +137,7 @@ impl Change {
     }
 
     /// The properties written by this change (for per-property region locks, spec §7.6).
+    #[must_use]
     pub fn target_props(&self) -> Vec<Arc<str>> {
         match self {
             Change::Create { props, .. } => props.iter().map(|(k, _)| k.clone()).collect(),
@@ -151,6 +160,7 @@ pub struct Batch {
 
 impl Batch {
     /// An empty batch at `base_seq` (used by tests and heartbeat paths).
+    #[must_use]
     pub fn empty(id: BatchId, base_seq: Seq) -> Self {
         Batch { id, base_seq, changes: Vec::new() }
     }

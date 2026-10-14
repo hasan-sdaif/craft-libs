@@ -1,3 +1,6 @@
+//! (Test code: assertions may panic — that is their point.)
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic, clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+
 //! The diff contract (spec §5.3): `apply(diff(a, b), a) == b` — the literal convergence
 //! property ported from figcraft's `diff_tests.rs`, over randomly generated real edits.
 
@@ -10,7 +13,7 @@ use std::sync::Arc;
 fn build(r: &Replica, space: u32, rng: &mut Rng) -> Vec<Change> {
     // A random real-ish edit: create a few nodes, edit one existing node's props.
     let mut changes = Vec::new();
-    for _ in 0..1 + rng.below(3) {
+    for _ in 0..=rng.below(3) {
         let id = NodeId::compose(space, (rng.below(10_000) + 1) as u32);
         changes.push(Change::Create {
             id,
@@ -56,13 +59,10 @@ fn diff_then_apply_equals_target() {
             let changes = build(&b, 0, &mut rng);
             apply_changes(&mut b, &changes);
         }
-        let changes = craft_collab::diff::diff(&before, &b, 0, 1, before.seq());
+        let batch = craft_collab::diff::diff(&before, &b, 0, 1, before.seq());
         let mut reconstructed = before.clone();
-        apply_changes(&mut reconstructed, &changes);
-        assert!(
-            craft_collab::sim::replicas_equal(&reconstructed, &b),
-            "diff roundtrip failed at seed {seed}"
-        );
+        let _ = reconstructed.apply(&batch, craft_collab::replica::ApplyMode::Strict);
+        assert!(craft_collab::sim::replicas_equal(&reconstructed, &b), "diff roundtrip failed at seed {seed}");
     }
 }
 
@@ -70,12 +70,15 @@ fn diff_then_apply_equals_target() {
 #[test]
 fn deletes_collapse_per_subtree() {
     let mut r = Replica::new();
-    apply_changes(&mut r, &[
-        Change::Create { id: NodeId(1), kind: Arc::from("g"), parent: NodeId(0), position: "a0".into(), props: vec![] },
-        Change::Create { id: NodeId(2), kind: Arc::from("r"), parent: NodeId(1), position: "a0".into(), props: vec![] },
-        Change::Create { id: NodeId(3), kind: Arc::from("r"), parent: NodeId(1), position: "a1".into(), props: vec![] },
-        Change::Create { id: NodeId(4), kind: Arc::from("r"), parent: NodeId(0), position: "a1".into(), props: vec![] },
-    ]);
+    apply_changes(
+        &mut r,
+        &[
+            Change::Create { id: NodeId(1), kind: Arc::from("g"), parent: NodeId(0), position: "a0".into(), props: vec![] },
+            Change::Create { id: NodeId(2), kind: Arc::from("r"), parent: NodeId(1), position: "a0".into(), props: vec![] },
+            Change::Create { id: NodeId(3), kind: Arc::from("r"), parent: NodeId(1), position: "a1".into(), props: vec![] },
+            Change::Create { id: NodeId(4), kind: Arc::from("r"), parent: NodeId(0), position: "a1".into(), props: vec![] },
+        ],
+    );
     let before = r.clone();
     r.delete(NodeId(1)); // Takes 2 and 3 with it.
     let changes = craft_collab::diff::diff(&before, &r, 0, 1, before.seq());

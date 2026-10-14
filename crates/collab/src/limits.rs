@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// The enforced limits of a collaboration session/file (v2 defaults kept literally).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Limits {
-    /// Maximum size of one client message (the Welcome carrying a whole document is larger).
+    /// Maximum size of one client message (the `Welcome` carrying a whole document is larger).
     pub max_message_bytes: usize,
     /// Maximum changes in one batch (one user action = one undo step).
     pub max_changes: usize,
@@ -20,7 +20,7 @@ pub struct Limits {
     pub max_name: usize,
     /// Batches kept in the catch-up log.
     pub max_log_batches: usize,
-    /// Changes kept in the catch-up log.
+    /// `Changes` kept in the catch-up log.
     pub max_log_changes: usize,
 }
 
@@ -44,11 +44,9 @@ impl Limits {
     ///
     /// Spec §2.12: "names are 64 characters without control characters" — a rule so small it is
     /// still a binding, tested requirement (spec §0.1 rule 10).
+    #[must_use]
     pub fn clean_name(&self, name: &str) -> String {
-        name.chars()
-            .filter(|c| !c.is_control())
-            .take(self.max_name)
-            .collect()
+        name.chars().filter(|c| !c.is_control()).take(self.max_name).collect()
     }
 }
 

@@ -26,16 +26,20 @@ pub struct NodeId(pub u64);
 
 impl NodeId {
     /// The client space this id belongs to (`0` = legacy file ids).
+    #[must_use]
     pub fn space(self) -> u32 {
         (self.0 >> 32) as u32
     }
 
     /// The per-space counter of this id.
+    #[must_use]
     pub fn counter(self) -> u32 {
-        self.0 as u32
+        // The low 32 bits by construction (compose packs them there).
+        (self.0 & 0xFFFF_FFFF) as u32
     }
 
     /// Build the id for `space` and `counter`.
+    #[must_use]
     pub fn compose(space: u32, counter: u32) -> Self {
         NodeId((u64::from(space) << 32) | u64::from(counter))
     }
@@ -52,6 +56,7 @@ pub struct Allocator {
 
 impl Allocator {
     /// An empty allocator (a fresh local document).
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -59,7 +64,7 @@ impl Allocator {
     /// Note an id that exists in the document, so future allocation stays above it.
     pub fn note(&mut self, id: NodeId) {
         let e = self.next.entry(id.space()).or_insert(0);
-        if id.counter() >= *e {
+        if u64::from(id.counter()) >= *e {
             *e = u64::from(id.counter()) + 1;
         }
     }
@@ -76,6 +81,7 @@ impl Allocator {
     ///
     /// `used_spaces` are the client spaces present in the document (nodes, styles, variables,
     /// collections, comments, modes — every doc-level entry shares the same allocator, spec §2.2).
+    #[must_use]
     pub fn next_client_id(&self, used_spaces: &[u32], granted_so_far: u32) -> Option<ClientId> {
         let highest = used_spaces.iter().copied().chain([granted_so_far]).max()?;
         if highest == u32::MAX {

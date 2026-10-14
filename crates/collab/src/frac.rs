@@ -276,13 +276,12 @@ pub fn between(a: Option<&str>, b: Option<&str>) -> Result<String, KeyError> {
         }
         (Some(a), None) => {
             let (ia, fa) = split(a)?;
-            match increment_int(ia) {
-                Some(i) => Ok(to_string(i)),
-                None => {
-                    let mut out = ia.to_vec();
-                    out.extend(midpoint(fa, None)?);
-                    Ok(to_string(out))
-                }
+            if let Some(i) = increment_int(ia) {
+                Ok(to_string(i))
+            } else {
+                let mut out = ia.to_vec();
+                out.extend(midpoint(fa, None)?);
+                Ok(to_string(out))
             }
         }
         (Some(a), Some(b)) => {

@@ -57,22 +57,23 @@ pub struct Client {
     history: Vec<UndoStep>,
     /// Redo stack.
     redo: Vec<UndoStep>,
-    /// Whether the next local batch should merge into one undo step (a gesture).
-    merging: Option<BatchId>,
 }
 
 impl Client {
     /// A fresh client over a confirmed catch-up state.
+    #[must_use]
     pub fn new(confirmed: Replica) -> Self {
         Self { confirmed, ..Self::default() }
     }
 
     /// My granted client id.
+    #[must_use]
     pub fn id(&self) -> Option<crate::ids::ClientId> {
         self.me
     }
 
     /// The pending (unconfirmed) batches, in order.
+    #[must_use]
     pub fn pending(&self) -> &[Batch] {
         &self.unconfirmed
     }
@@ -82,11 +83,15 @@ impl Client {
         self.unconfirmed.push(batch);
     }
 
-    /// The server echoed my batch: it is confirmed now (spec §5.5 — no rebuild: same values).
+    /// The server echoed my batch: it moves from unconfirmed to **confirmed** (spec §5.5 —
+    /// the batch applies to the confirmed state; the user's view never flickers because the
+    /// optimistic application already showed the same values).
     pub fn on_echo(&mut self, seq: Seq, batch_id: BatchId) {
-        self.unconfirmed.retain(|b| b.id != batch_id);
+        if let Some(pos) = self.unconfirmed.iter().position(|b| b.id == batch_id) {
+            let batch = self.unconfirmed.remove(pos);
+            let _ = self.confirmed.apply(&batch, ApplyMode::Lenient);
+        }
         self.last_seq = seq;
-        let _ = &self.merging;
     }
 
     /// The server refused my batch: drop it, learn the fixes, drop its undo step (spec §5.6).
@@ -110,6 +115,7 @@ impl Client {
     }
 
     /// The view state: confirmed plus my unconfirmed batches replayed leniently (spec §5.5).
+    #[must_use]
     pub fn view(&self) -> Replica {
         let mut v = self.confirmed.clone();
         for b in &self.unconfirmed {
@@ -120,6 +126,7 @@ impl Client {
 
     /// Whether every one of my batches has been accepted or refused (undo waits for this,
     /// spec §5.6 rule (a)).
+    #[must_use]
     pub fn flushed(&self) -> bool {
         self.unconfirmed.is_empty()
     }
@@ -129,6 +136,7 @@ impl Client {
     /// Computed from the **confirmed** state against server order: a target is undone only if
     /// its last writer (by the order the client has seen) is still the author; creations are
     /// deleted only when no one else has parented into them; deleted subtrees are recreated.
+    #[must_use]
     pub fn undo_step(&self) -> Option<&UndoStep> {
         self.history.iter().rev().find(|s| !s.before.is_empty() || !s.created.is_empty() || !s.deleted.is_empty())
     }
@@ -150,7 +158,7 @@ impl Client {
                 Some(v) => v.clone(),
                 None => crate::value::Value::Json(serde_json::Value::Null),
             };
-            if current != &target_value {
+            if current != Some(&target_value) {
                 changes.push(Change::Set { id, prop: std::sync::Arc::from(prop.as_str()), value: target_value });
             }
         }

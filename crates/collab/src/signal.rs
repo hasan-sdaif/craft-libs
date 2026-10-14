@@ -39,13 +39,15 @@ pub const RATE_PER_SECOND: u32 = 20;
 pub const BURST: u32 = 40;
 
 /// Clean a chat signal (control characters become spaces, then trimmed).
+#[must_use]
 pub fn clean_chat(text: &str) -> String {
     text.chars().map(|c| if c.is_control() { ' ' } else { c }).take(MAX_CHAT_CHARS).collect()
 }
 
 /// Whether a serialized signal fits the wire budget.
+#[must_use]
 pub fn fits(signal: &Signal) -> bool {
-    postcard::to_allocvec(signal).map(|v| v.len() <= MAX_SIGNAL_BYTES).unwrap_or(false)
+    postcard::to_allocvec(signal).is_ok_and(|v| v.len() <= MAX_SIGNAL_BYTES)
 }
 
 #[cfg(test)]
