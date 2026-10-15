@@ -1,0 +1,42 @@
+# Build evidence for the add-craft-collab PR (storytold/craft-libs#128): this branch is the
+# PR tree plus only this workflow file. Runs the workspace gates the repo's own CI pattern
+# uses: fmt, clippy -D warnings, and the full test suite (with the Vulkan setup the Shared UI
+# workflow uses on Linux), so the collab crate's suite is verified in the monorepo context.
+name: collab-pr-verification
+on:
+  push:
+    branches: [ci-verification]
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+concurrency:
+  group: collab-verify-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  gate:
+    name: fmt + clippy + tests (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install software Vulkan renderer (the Shared UI workflow's Linux setup)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1
+          echo 'WGPU_BACKEND=vulkan' >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Tests (full workspace, including the collab crate's suite)
+        run: cargo test --workspace --locked
